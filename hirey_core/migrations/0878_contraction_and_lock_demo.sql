@@ -1,5 +1,4 @@
-ALTER TABLE core.demo DROP COLUMN old_col;
+-- Contraction-Of: 0875_base.sql
+-- Consumers-Cleared: hirey_core PR #1, hi-platform N/A
 
-LOCK TABLE core.demo IN SHARE MODE;
-UPDATE core.demo SET col = 'x';
-CREATE INDEX idx_demo ON core.demo (col);
+ALTER TABLE core.demo DROP COLUMN old_col;
