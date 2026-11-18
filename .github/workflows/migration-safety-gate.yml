@@ -1,0 +1,44 @@
+name: Migration safety gate
+
+# ENG-537: enforce post-lock no-index/no-backfill and contraction (L2a) checks
+# on newly added or modified migrations under hirey_core/migrations/.
+# See AGENTS.md, "Migration safety gate".
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, edited]
+
+permissions:
+  contents: read
+
+jobs:
+  migration-safety:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Gate self-test
+        run: python scripts/migration_safety_gate.test.py
+
+      - name: Feature flags unit tests
+        run: python -m unittest -v test_feature_flags
+
+      - name: Check migration post-lock and contraction safety rules
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          if git cat-file -e "${BASE_SHA}:scripts/migration_safety_gate.py" 2>/dev/null; then
+            git show "${BASE_SHA}:scripts/migration_safety_gate.py" > "${RUNNER_TEMP}/migration_safety_gate.py"
+            python "${RUNNER_TEMP}/migration_safety_gate.py" --base "$BASE_SHA" --head "$HEAD_SHA"
+          else
+            echo "::notice::Base commit lacks scripts/migration_safety_gate.py; running candidate gate for initial bootstrap."
+            python scripts/migration_safety_gate.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          fi

@@ -1,0 +1,91 @@
+name: Migration immutability gate
+
+# ENG-143 (2026-10-30, #3010 edited merged migration 0722 in place): a PR may
+# only add files under hirey_core/migrations/, each numbered above the base
+# branch's latest. Blocking. See AGENTS.md, "Merged migrations are immutable".
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  migration-immutability:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Gate self-test
+        run: python scripts/migration_immutability_gate.test.py
+
+      - name: Merged migrations unchanged, new ones numbered above main
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # Execute the gate exactly as merged on BASE_SHA, never the PR's copy.
+          # fetch-depth: 0 gives it full history so it can walk first-parent
+          # duplicate-migration history in the checked-out repository.
+          git show "${BASE_SHA}:scripts/migration_immutability_gate.py" > "${RUNNER_TEMP}/migration_immutability_gate.py"
+          python "${RUNNER_TEMP}/migration_immutability_gate.py" --base "$BASE_SHA" --head "$HEAD_SHA"
+
+  mechanical-review-carryover:
+    needs: migration-immutability
+    if: ${{ github.event.pull_request.head.repo.full_name == github.repository }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          # Trust boundary: this write-permitted job checks out BASE_SHA and
+          # executes only scripts fetched from BASE_SHA
+          # (`git show "${BASE_SHA}:..."`), never code from the PR head.
+          # Explicit premise: the `pull_request` workflow YAML itself is read
+          # from the same-repo PR branch (this job is skipped for forks), and
+          # its authors already have repo write access.
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Verify mechanical migration renumber and post review receipt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          set +x
+          git show "${BASE_SHA}:scripts/migration_immutability_gate.py" > "${RUNNER_TEMP}/migration_immutability_gate.py"
+          git show "${BASE_SHA}:scripts/renumber_migrations.py" > "${RUNNER_TEMP}/renumber_migrations.py"
+          if ! grep -q -- '--ci-post-mechanical-review' "${RUNNER_TEMP}/renumber_migrations.py"; then
+            echo "::notice::Base renumber_migrations.py does not support --ci-post-mechanical-review yet; skipping until base merges."
+            exit 0
+          fi
+
+          askpass="${RUNNER_TEMP}/git-askpass.sh"
+          python3 -c 'import pathlib, sys; pathlib.Path(sys.argv[1]).write_text("#!/bin/sh\ncase \"$1\" in\n  *Username*) echo x-access-token ;;\n  *Password*) printenv GH_TOKEN ;;\nesac\n", encoding="utf-8")' "$askpass"
+          chmod 700 "$askpass"
+          trap 'rm -f "$askpass"' EXIT
+
+          GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$askpass" git fetch --no-tags origin "$HEAD_SHA" \
+            || GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$askpass" git fetch --no-tags origin "+refs/pull/${PR_NUMBER}/head:refs/remotes/origin/pr/${PR_NUMBER}"
+
+          GIT_TERMINAL_PROMPT=0 GIT_ASKPASS="$askpass" python3 "${RUNNER_TEMP}/renumber_migrations.py" \
+            --repo . \
+            --ci-post-mechanical-review \
+            --github-repo "${GITHUB_REPOSITORY}" \
+            --pr "${PR_NUMBER}" \
+            --base "${BASE_SHA}" \
+            --head "${HEAD_SHA}"
